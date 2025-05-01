@@ -1,0 +1,267 @@
+/*
+  Script de Controle de Tempo e Cobrança de Chamados no Zoho Desk
+
+  Este script executa as seguintes operações:
+
+  1. Recupera os dados de um ticket específico e seu contrato relacionado.
+  2. Verifica se o tipo de cobrança do ticket é diferente de "Faturável":
+     - Se não for "Faturável", remove as horas trabalhadas anteriormente e atualiza o ticket.
+     - Em seguida, registra essas horas como uma entrada de tempo (Time Entry).
+  3. Calcula as horas contratadas e o saldo restante com base nas informações do contrato.
+  4. Se houver horas trabalhadas associadas ao ticket:
+     - Converte o valor de horas para minutos.
+     - Calcula o novo saldo de horas e atualiza tanto o ticket quanto o contrato.
+  5. Atualiza o total de horas utilizadas e calcula o percentual de horas restantes em relação ao total contratado.
+  6. Ativa automaticamente um campo de checkbox no ticket, que funciona como gatilho para o envio de um e-mail de notificação.
+  7. Todas as chamadas à API são feitas por meio da conexão segura "zoho_desk".
+*/
+urlTickets = "https://desk.zoho.com/api/v1/tickets/" + ticketID;
+ticket = invokeurl
+[
+	url :urlTickets
+	type :GET
+	parameters:{"include":"contract"}
+	connection:"zoho_desk"
+];
+info ticket;
+if(ticket != null && ticket.get("cf") != null && ticket.get("cf").get("cf_tipo_de_cobranca") != "Faturável")
+{
+	info "Tipo de cobrança diferente de 'Faturável'. Interrompendo execução.";
+	if(ticket.get("cf") != null && ticket.get("cf").get("cf_horas_trabalhadas") != null)
+	{
+		currentTime = ticket.get("cf").get("cf_horas_trabalhadas").toString();
+		if(currentTime.contains(":") && currentTime.toList(":").size() == 2)
+		{
+			cf_object = Map();
+			cf_object.put("cf_tipo_de_cobranca","-None-");
+			cf_object.put("cf_horas_trabalhadas","");
+			updateData = Map();
+			updateData.put("cf",cf_object);
+			updateHoursErase = zoho.desk.update(orgID,"tickets",ticketID,updateData,"zoho_desk");
+			hours = currentTime.toList(":").get(0).toLong();
+			minutes = currentTime.toList(":").get(1).toLong();
+			seconds = 0;
+			dataAtual = zoho.currenttime.toString("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'");
+			data = Map();
+			data.put("secondsSpent",seconds.toString());
+			data.put("minutesSpent",minutes.toString());
+			data.put("hoursSpent",hours.toString());
+			data.put("executedTime",dataAtual);
+			logHorasTicket = invokeurl
+			[
+				url :"https://desk.zoho.com/api/v1/tickets/" + ticketID + "/timeEntry"
+				type :POST
+				body:data.toString()
+				headers:{"Content-Type":"application/json"}
+				connection:"zoho_desk"
+			];
+			return;
+		}
+	}
+}
+urlContracts = "https://desk.zoho.com/api/v1/contracts/" + ticket.get("contractId");
+dataContract = invokeurl
+[
+	url :urlContracts
+	type :GET
+	connection:"zoho_desk"
+];
+info dataContract;
+if(dataContract.get("cf") != null && dataContract.get("cf").get("cf_horas_contratadas_approach") != null)
+{
+	horas_contratadas_bruto = dataContract.get("cf").get("cf_horas_contratadas_approach");
+	porcentagem_Horas = dataContract.get("cf").get("cf_percentual_limite");
+	horas_contratadas_number = horas_contratadas_bruto.toNumber();
+	horas_contratadas_minutes = horas_contratadas_number * 60;
+}
+if(ticket.get("cf") != null)
+{
+	if(dataContract.get("cf").get("cf_horas_restantes") == null)
+	{
+		//atualiza com base no ticket
+		updateContract = zoho.desk.update(orgID,"contracts",ticket.get("contractId"),{"cf_horas_restantes":dataContract.get("cf").get("cf_horas_contratadas_approach")});
+		valorHora = dataContract.get("cf").get("cf_horas_contratadas_approach");
+	}
+	else
+	{
+		valorHora = dataContract.get("cf").get("cf_horas_restantes");
+	}
+	valor_horas_restantes = valorHora;
+	if(valor_horas_restantes != null && valor_horas_restantes.toString().trim().length() >= 5)
+	{
+		valor_str = valor_horas_restantes.toString().trim();
+		if(valor_str.indexOf(":") > 0)
+		{
+			parte_horas = valor_str.subString(0,valor_str.indexOf(":"));
+			parte_minutos = valor_str.subString(valor_str.indexOf(":") + 1);
+			horas = parte_horas.toNumber();
+			minutos = parte_minutos.toNumber();
+			if(horas != null && minutos != null)
+			{
+				valor_horas_restantes_minutes = horas * 60 + minutos;
+				// 				info "Horas restantes em minutos: " + valor_horas_restantes_minutes;
+			}
+		}
+	}
+	if(valor_horas_restantes == null || valor_horas_restantes.toString().trim().length() < 5)
+	{
+		valor_horas_restantes_minutes = horas_contratadas_minutes;
+		// 		info "Valor de horas_restantes vazio" + valor_horas_restantes_minutes;
+	}
+}
+if(ticket.get("cf") != null && ticket.get("cf").get("cf_horas_trabalhadas") != null)
+{
+	horas_trabalhadas_no_formated = ticket.get("cf").get("cf_horas_trabalhadas").toString().trim();
+	if(horas_trabalhadas_no_formated.matches("^[0-2][0-9]:[0-5][0-9]$"))
+	{
+		parte_horas = horas_trabalhadas_no_formated.subString(0,2);
+		parte_minutos = horas_trabalhadas_no_formated.subString(3,5);
+		horas = parte_horas.toNumber();
+		minutos = parte_minutos.toNumber();
+		horas_trabalhadas_minutes = horas * 60 + minutos;
+		// 		info "Total em minutos: " + horas_trabalhadas_minutes;
+	}
+}
+if(horas_contratadas_minutes != null && valor_horas_restantes_minutes != null && horas_trabalhadas_minutes != null && horas_contratadas_minutes > 0 && valor_horas_restantes_minutes > 0 && horas_trabalhadas_minutes > 0)
+{
+	calculo_banco_horas_minute = valor_horas_restantes_minutes - horas_trabalhadas_minutes;
+	if(calculo_banco_horas_minute >= 0)
+	{
+		horas = floor(calculo_banco_horas_minute / 60);
+		// Parte inteira das horas
+		minutos = calculo_banco_horas_minute % 60;
+		// Resto de minutos
+		horas_formatadas = if(horas < 10,"0" + horas,horas);
+		minutos_formatados = if(minutos < 10,"0" + minutos,minutos);
+		resultado_formatado = horas_formatadas + ":" + minutos_formatados;
+		cf_object = Map();
+		cf_object.put("cf_horas_trabalhadas","");
+		cf_object.put("cf_tipo_de_cobranca","-None-");
+		updateData = Map();
+		updateData.put("cf",cf_object);
+		//ATUALIZACAO DO TICKET//
+		updateHoursRest = zoho.desk.update(orgID,"tickets",ticketID,updateData,"zoho_desk");
+		//atualização do calculo
+		if(ticket.get("cf") != null && ticket.get("cf").get("cf_horas_trabalhadas") != null)
+		{
+			currentTime = ticket.get("cf").get("cf_horas_trabalhadas").toString();
+			if(currentTime.contains(":") && currentTime.toList(":").size() == 2)
+			{
+				hours = currentTime.toList(":").get(0).toLong();
+				minutes = currentTime.toList(":").get(1).toLong();
+				seconds = 0;
+				dataAtual = zoho.currenttime.toString("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'");
+				// 		info "Horas Trabalhadas: " + hours + " " + minutes + " " + seconds;
+				data = Map();
+				data.put("isBillable",true);
+				data.put("secondsSpent",seconds.toString());
+				data.put("minutesSpent",minutes.toString());
+				data.put("hoursSpent",hours.toString());
+				data.put("executedTime",dataAtual);
+				logHorasTicket = invokeurl
+				[
+					url :"https://desk.zoho.com/api/v1/tickets/" + ticketID + "/timeEntry"
+					type :POST
+					body:data.toString()
+					headers:{"Content-Type":"application/json"}
+					connection:"zoho_desk"
+				];
+				info "Log de Horas Criado: " + logHorasTicket;
+			}
+		}
+	}
+}
+if(updateHoursRest)
+{
+	partes_horas = resultado_formatado.subString(0,resultado_formatado.indexOf(":"));
+	partes_minutos = resultado_formatado.subString(resultado_formatado.indexOf(":") + 1);
+	horas = partes_horas.toNumber();
+	minutos = partes_minutos.toNumber();
+	minutos_total = horas * 60 + minutos;
+	calHorasUtilizadas = horas_contratadas_minutes - minutos_total;
+	usedHours = floor(calHorasUtilizadas / 60);
+	usedMinutes = calHorasUtilizadas % 60;
+	hoursStr = usedHours.toString();
+	minutesStr = usedMinutes.toString();
+	if(usedHours < 10)
+	{
+		hoursStr = "0" + hoursStr;
+	}
+	if(usedMinutes < 10)
+	{
+		minutesStr = "0" + minutesStr;
+	}
+	resultadoHorasUtilizadas = hoursStr + ":" + minutesStr;
+	// 	info "Resultado de horas utilizadas: " + resultadoHorasUtilizadas;
+}
+if(resultado_formatado != null && ticket.get("contractId") != null && resultadoHorasUtilizadas != "")
+{
+	cf_object_contract = Map();
+	cf_object_contract.put("cf_horas_restantes",resultado_formatado);
+	cf_object_contract.put("cf_horas_utilizadas",resultadoHorasUtilizadas);
+	updateData_contract = Map();
+	updateData_contract.put("cf",cf_object_contract);
+	updateHoursRestContract = zoho.desk.update(orgID,"contracts",ticket.get("contractId"),updateData_contract,"zoho_desk");
+	if(resultadoHorasUtilizadas)
+	{
+		info resultadoHorasUtilizadas;
+		cf_campo = Map();
+		cf_campo.put("cf_total_horas_trabalhadas",resultadoHorasUtilizadas);
+		cf_update_hours = Map();
+		cf_update_hours.put("cf",cf_campo);
+		cf_update_hours = zoho.desk.update(orgID,"tickets",ticketID,cf_update_hours,"zoho_desk");
+	}
+}
+if(resultado_formatado != null && horas_contratadas_minutes != null && horas_contratadas_minutes > 0)
+{
+	partes_horas_restantes = resultado_formatado.subString(0,resultado_formatado.indexOf(":"));
+	partes_minutos_restantes = resultado_formatado.subString(resultado_formatado.indexOf(":") + 1);
+	valor_horas_restantes_minutes_atualizado = partes_horas_restantes.toNumber() * 60 + partes_minutos_restantes.toNumber();
+	percentual_restante = (valor_horas_restantes_minutes_atualizado * 100) / horas_contratadas_minutes;
+	info "Percentual restante: " + percentual_restante.round(2) + "% das horas contratadas.";
+	//Ver Amanha e validar corretamentamente
+	if(percentual_restante <= porcentagem_Horas)
+	{
+		info ": Restam apenas " + percentual_restante.round(2).toString() + "% das horas contratadas!";
+		campos_cf = Map();
+		campos_cf.put("cf_gatilho_percentual_limite_do_contrato",true);
+		sendEmail = Map();
+		sendEmail.put("cf",campos_cf);
+		sendEmailContract = zoho.desk.update(orgID,"tickets",ticketID,sendEmail,"zoho_desk");
+		info "Campo cf_envio_email atualizado no ticket.";
+	}
+}
+if(dataContract)
+{
+	urlTickets = "https://desk.zoho.com/api/v1/tickets/" + ticketID;
+	ticket = invokeurl
+	[
+		url :urlTickets
+		type :GET
+		parameters:{"include":"contract"}
+		connection:"zoho_desk"
+	];
+	// info ticket;
+	urlContracts = "https://desk.zoho.com/api/v1/contracts/" + ticket.get("contractId");
+	dataContract = invokeurl
+	[
+		url :urlContracts
+		type :GET
+		connection:"zoho_desk"
+	];
+	// info dataContract;
+	if(dataContract.get("cf").get("cf_horas_contratadas_approach") != null)
+	{
+		horasContratadasContract = dataContract.get("cf").get("cf_horas_contratadas_approach");
+		horasRestantesContract = dataContract.get("cf").get("cf_horas_restantes");
+		horasUtilizadasContract = dataContract.get("cf").get("cf_horas_utilizadas");
+		campos_cf = Map();
+		campos_cf.put("cf_horas_contratadas",horasContratadasContract);
+		campos_cf.put("cf_horas_restantes",horasRestantesContract);
+		campos_cf.put("cf_total_de_horas_trabalhadas",horasUtilizadasContract);
+		updateCampos = Map();
+		updateCampos.put("cf",campos_cf);
+		updateCampos = zoho.desk.update(orgID,"tickets",ticketID,updateCampos,"zoho_desk");
+		// 		info "Campo cf_envio_email atualizado no ticket.";
+	}
+}
